@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 # 필수 환경 변수 정의
 REQUIRED_ENV_VARS = [
     'GSHEET_CREDENTIALS_JSON',
-    'API_KEY'
+    'API_KEY',
+    'ANTHROPIC_API_KEY'
 ]
 
 def check_env_vars():
