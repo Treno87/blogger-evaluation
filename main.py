@@ -10,11 +10,11 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from openai import OpenAI
+from anthropic import Anthropic
 from webdriver_manager.chrome import ChromeDriverManager
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 # Google Sheets 연동 설정 (open_by_key 사용)
 def connect_to_sheet_by_id():
@@ -26,8 +26,11 @@ def connect_to_sheet_by_id():
     return sheet
 
 # 1. 블로그 제목 추출 함수
-
 def extract_naver_blog_title(blog_url):
+    # 모바일 URL을 PC URL로 변환
+    if 'm.blog.naver.com' in blog_url:
+        blog_url = blog_url.replace('m.blog.naver.com', 'blog.naver.com')
+        
     headers = {"User-Agent": "Mozilla/5.0"}
     res = requests.get(blog_url, headers=headers)
     soup = BeautifulSoup(res.text, "html.parser")
@@ -50,7 +53,7 @@ def extract_naver_blog_title(blog_url):
     # 3. fallback: <title> 태그
     return soup.title.string.strip() if soup.title else None
 
-# 2. OpenAI로 메인/서브 키워드 추출 (최신 OpenAI 라이브러리 사용)
+# 2. Claude로 메인/서브 키워드 추출
 def extract_keywords_from_title(title):
     # 지역명 JSON 구조
     region_keywords = {
@@ -209,6 +212,7 @@ def extract_keywords_from_title(title):
                     for synonym in region_group["synonyms"][region]:
                         if synonym in title:
                             found_region = synonym
+                            break
                 break
         if found_region:
             break
@@ -228,13 +232,14 @@ def extract_keywords_from_title(title):
     {f'지역명: "{found_region}"' if found_region else '지역명: 없음'}
     
     키워드 규칙
-    - 메인 키워드는 지역명 + 메인키워드
-    - 지역명은 반드시 "~역" 형식으로 써. 예를 들어 "강남"이면 "강남역"으로 써. 
-    - 서브 키워드는 브랜드명 제외, 일반적인 단어, 불필요한 수식어, 뜻을 알 수 없는 단어, 무의미한 단어, 특수문자나 이모지 제외
+    - 메인 키워드는 지역명 + 시술명 조합으로 해줘. '미용실'은 키워드에서 제외.
+    - 지역명은 반드시 "~역" 또는 "~동" 형식으로 써. 예를 들어 "강남"이면 "강남역"으로 써. 
+    - 모든 키워드에서 브랜드명 제외, 일반적인 단어, 불필요한 수식어, 뜻을 알 수 없는 단어, 무의미한 단어, 특수문자나 이모지 제외
     - 키워드는 제공한 {title}에 포함된 단어와 단어들의 조합으로 만들어. 
     - 키워드는 서술어만 있으면 안돼. 예를 들어 '깔끔한'은 키워드가 될 수 없음.  
     - 키워드는 완결된 형태로 해. 예를 들어 '깔끔한 남자머리'처럼 완결된 형태로 해. 
     - 네이버SEO에 최적화된 키워드를 추출해줘.
+    - 메인 키워드와 서브키워드는 중복되지 않게 해.
     - 디자이너, 디자이너 바로 앞,뒤 단어, 미용실, 추천, 후기 제외
     - 키워드를 추출하고 난 뒤 최종적으로 뜻을 알 수 없는 단어가 있으면 제외해
     
@@ -243,22 +248,23 @@ def extract_keywords_from_title(title):
     {{
         "main_keyword": "키워드",
         "sub_keywords": ["키워드1", "키워드2", "키워드3"],
-        "sub_keywords_with_region": ["키워드1", "키워드2", "키워드3"]
+        "sub_keywords_with_region": ["지역명 키워드1", "지역명 키워드2", "지역명 키워드3"]
     }}
 
     참고: {f'제목에서 추출된 지역명은 "{found_region}"입니다. 이 지역명을 사용하여 키워드를 생성해주세요.' if found_region else '제목에서 지역명을 찾을 수 없습니다. 지역명을 포함하지 않은 키워드만 생성해주세요.'}
     """
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
+    response = client.messages.create(
+        model="claude-3-7-sonnet-20250219",
+        max_tokens=1000,
+        system="너는 마케팅 키워드 전문가야. JSON 형식으로만 응답해줘.",
         messages=[
-            {"role": "system", "content": "너는 마케팅 키워드 전문가야. JSON 형식으로만 응답해줘."},
             {"role": "user", "content": prompt}
         ],
         temperature=0.3
     )
 
-    result_text = response.choices[0].message.content
+    result_text = response.content[0].text
     
     # 마크다운 코드 블록 제거
     result_text = result_text.replace("```json", "").replace("```", "").strip()
@@ -273,6 +279,10 @@ def extract_keywords_from_title(title):
 # 3. 네이버 검색에서 블로그 순위 확인 (Selenium)
 def get_post_rank(keyword, target_url):
     try:
+        # 모바일 URL을 PC URL로 변환
+        if 'm.blog.naver.com' in target_url:
+            target_url = target_url.replace('m.blog.naver.com', 'blog.naver.com')
+            
         # Chrome 옵션 설정
         chrome_options = Options()
         chrome_options.add_argument('--headless')  # 헤드리스 모드
@@ -360,8 +370,8 @@ def analyze_all_blog_posts(sheet):
         rows_to_process = 0
         
         for i, row in enumerate(all_rows, start=2):
-            # F열의 URL 확인 (이전 E열)
-            blog_url = sheet.cell(i, 6).value  # F열은 6번째 열
+            # E열의 URL 확인
+            blog_url = sheet.cell(i, 5).value  # E열은 5번째 열
             if not blog_url:  # URL이 없는 행은 건너뛰기
                 continue
 
@@ -427,17 +437,13 @@ def analyze_all_blog_posts(sheet):
                 else:
                     non_ranked_keywords.append(kw)
 
-            # 노출된 키워드가 있는 경우에만 30% 가중치 적용
-            if ranked_keywords:  # 노출된 키워드가 있으면
-                for _ in non_ranked_keywords:
-                    sub_ranks.append(30 * 0.3)  # 30% 가중치 적용
-            else:  # 노출된 키워드가 없으면
-                for _ in non_ranked_keywords:
-                    sub_ranks.append(30)  # 30위로 처리
-
-            # 모든 서브 키워드의 평균 순위 계산
-            avg_sub_rank = sum(sub_ranks) / len(sub_ranks)
-            print(f"[{i}] 서브 키워드 평균 순위: {round(avg_sub_rank, 1)} (노출 안된 키워드는 {30 * 0.3 if ranked_keywords else 30}위로 처리)")
+            # 노출된 키워드의 평균 순위 계산 (노출된 키워드만 고려)
+            avg_sub_rank = None
+            if sub_ranks:  # 노출된 키워드가 있는 경우에만 평균 계산
+                avg_sub_rank = sum(sub_ranks) / len(sub_ranks)
+                print(f"[{i}] 서브 키워드 평균 순위: {round(avg_sub_rank, 1)} ({len(sub_ranks)}개 노출 키워드 평균)")
+            else:
+                print(f"[{i}] 노출된 서브 키워드가 없습니다.")
 
             # 메인 키워드가 노출되지 않더라도 점수 계산
             if main_rank:
@@ -445,7 +451,12 @@ def analyze_all_blog_posts(sheet):
             else:
                 main_score = 0  # 메인 키워드가 노출되지 않으면 0점
 
-            sub_score = (30 - avg_sub_rank) / 30 * 60
+            # 노출된 서브 키워드가 없으면 0점, 있으면 평균 순위로 점수 계산
+            if avg_sub_rank:
+                sub_score = (30 - avg_sub_rank) / 30 * 60
+            else:
+                sub_score = 0
+
             score = round(main_score + sub_score, 2)
 
             # Google Sheets 업데이트 (올바른 범위 지정)
@@ -468,10 +479,16 @@ def analyze_all_blog_posts(sheet):
                 
             sheet.update_cell(i, 10, all_sub_keywords)  # J열 (이전 I열)
             
-            sheet.update_cell(i, 11, round(avg_sub_rank, 1) if avg_sub_rank else "N/A")  # K열 (이전 J열)
+            # 평균 순위에 노출된 키워드 수 표시 (예: "2.5(4개 평균)")
+            if avg_sub_rank:
+                avg_sub_rank_display = f"{round(avg_sub_rank, 1)}({len(sub_ranks)}개 평균)"
+            else:
+                avg_sub_rank_display = "노출 안됨"
+                
+            sheet.update_cell(i, 11, avg_sub_rank_display)  # K열 (이전 J열)
             sheet.update_cell(i, 12, score)  # L열 (이전 K열)
 
-            print(f"[{i}] 완료 - 메인:{main_rank}, 서브평균:{avg_sub_rank}, 점수:{score}")
+            print(f"[{i}] 완료 - 메인:{main_rank}, 서브평균:{avg_sub_rank_display if avg_sub_rank else '노출 안됨'}, 점수:{score}")
 
             # 5초 대기
             time.sleep(5)
